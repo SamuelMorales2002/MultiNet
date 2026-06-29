@@ -1,0 +1,37 @@
+# Dataset (imágenes originales y procesadas — demasiado pesadas para el repo)
+MIASDBV1.21/
+data/
+
+# Modelos entrenados
+results/*.keras
+results/*.h5
+
+# Entorno virtual
+venv_mias/
+venv/
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDEs
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
