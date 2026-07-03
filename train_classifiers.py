@@ -45,7 +45,7 @@ RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 IMG_SIZE    = (224, 224)
 BATCH_SIZE  = 32
-CLASSES     = ["benigno", "maligno", "normal"]   # orden alfabético = índices Keras
+CLASSES     = ["benigno", "maligno"]   # CBIS-DDSM: sin clase 'normal'
 NUM_CLASSES = len(CLASSES)
 SEED        = 42
 
@@ -211,10 +211,8 @@ def evaluate_model(model, test_gen, name):
                                    target_names=CLASSES, output_dict=True)
     f1_macro = f1_score(y_true, y_pred, average="macro")
 
-    # AUC-ROC multiclase (one-vs-rest)
-    y_true_bin = label_binarize(y_true, classes=[0, 1, 2])
-    auc = roc_auc_score(y_true_bin, y_pred_prob,
-                        multi_class="ovr", average="macro")
+    # AUC-ROC binario (clase positiva = maligno, índice 1)
+    auc = roc_auc_score(y_true, y_pred_prob[:, 1])
 
     acc = report["accuracy"]
 
