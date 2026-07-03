@@ -25,11 +25,13 @@ from pathlib import Path
 import tensorflow as tf
 from tensorflow.keras import layers, models, optimizers, callbacks
 from tensorflow.keras.applications import MobileNetV2, ResNet50, EfficientNetB3
+from tensorflow.keras.applications import mobilenet_v2, resnet50, efficientnet
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 
 from sklearn.metrics import (classification_report, confusion_matrix,
                              roc_auc_score, f1_score)
 from sklearn.preprocessing import label_binarize
+from sklearn.utils.class_weight import compute_class_weight
 import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use("Agg")   # sin interfaz gráfica
@@ -42,10 +44,17 @@ RESULTS_DIR = BASE_DIR / "results"
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 IMG_SIZE    = (224, 224)
-BATCH_SIZE  = 16
+BATCH_SIZE  = 32
 CLASSES     = ["benigno", "maligno", "normal"]   # orden alfabético = índices Keras
 NUM_CLASSES = len(CLASSES)
 SEED        = 42
+
+# Función de preprocesamiento propia de cada backbone (reemplaza rescale=1./255)
+PREPROCESS_FN = {
+    "MobileNetV2":    mobilenet_v2.preprocess_input,
+    "ResNet50":       resnet50.preprocess_input,
+    "EfficientNetB3": efficientnet.preprocess_input,
+}
 
 # Épocas por etapa
 EPOCHS_HEAD  = 10   # entrenar solo la cabeza
@@ -54,10 +63,11 @@ EPOCHS_FINE  = 20   # fine-tuning de capas superiores
 tf.random.set_seed(SEED)
 
 # ─── GENERADORES DE DATOS ─────────────────────────────────────────────────────
-def make_generators():
-    # Train: normalización estándar ImageNet (las bases ya están augmentadas en disco)
-    train_gen = ImageDataGenerator(rescale=1./255)
-    val_gen   = ImageDataGenerator(rescale=1./255)
+def make_generators(model_name):
+    # Cada backbone requiere su propio preprocesamiento (no un rescale genérico)
+    preprocess = PREPROCESS_FN[model_name]
+    train_gen = ImageDataGenerator(preprocessing_function=preprocess)
+    val_gen   = ImageDataGenerator(preprocessing_function=preprocess)
 
     train = train_gen.flow_from_directory(
         AUG_DIR / "train",
@@ -128,6 +138,17 @@ def train_model(name, train_gen, val_gen):
     model, base = build_model(name)
     model_path  = RESULTS_DIR / f"{name}_best.keras"
 
+    # Pesos de clase para compensar el desbalance (normal >> benigno/maligno)
+    class_indices = train_gen.class_indices  # {"benigno":0, "maligno":1, "normal":2}
+    y_train       = train_gen.classes
+    weights_arr   = compute_class_weight(
+        class_weight="balanced",
+        classes=np.unique(y_train),
+        y=y_train,
+    )
+    class_weights = dict(zip(np.unique(y_train), weights_arr))
+    print(f"  Class weights: {class_weights}")
+
     cb = [
         callbacks.ModelCheckpoint(str(model_path), save_best_only=True,
                                   monitor="val_loss", verbose=1),
@@ -145,23 +166,28 @@ def train_model(name, train_gen, val_gen):
         metrics=["accuracy"],
     )
     h1 = model.fit(train_gen, validation_data=val_gen,
-                   epochs=EPOCHS_HEAD, callbacks=cb, verbose=1)
+                   epochs=EPOCHS_HEAD, callbacks=cb, verbose=1,
+                   class_weight=class_weights)
 
     # ── Etapa 2: fine-tuning capas superiores ─────────────────────────────────
     # Descongelar último 30% de capas del backbone
     n_layers     = len(base.layers)
-    unfreeze_from = int(n_layers * 0.7)
+    unfreeze_from = int(n_layers * 0.85)   # último 15% (antes 30%, muy agresivo)
     for layer in base.layers[unfreeze_from:]:
-        layer.trainable = True
+        # Las capas BatchNorm deben permanecer en modo inferencia:
+        # descongelarlas en datasets pequeños rompe sus estadísticas acumuladas
+        if not isinstance(layer, layers.BatchNormalization):
+            layer.trainable = True
 
     print(f"\n  [Etapa 2] Fine-tuning ({n_layers - unfreeze_from} capas desbloqueadas, {EPOCHS_FINE} épocas máx)")
     model.compile(
-        optimizer=optimizers.Adam(1e-4),
+        optimizer=optimizers.Adam(1e-5),   # antes 1e-4, muy alto para dataset chico
         loss="categorical_crossentropy",
         metrics=["accuracy"],
     )
     h2 = model.fit(train_gen, validation_data=val_gen,
-                   epochs=EPOCHS_FINE, callbacks=cb, verbose=1)
+                   epochs=EPOCHS_FINE, callbacks=cb, verbose=1,
+                   class_weight=class_weights)
 
     # Combinar historiales
     history = {}
@@ -232,17 +258,17 @@ def evaluate_model(model, test_gen, name):
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
-    print("Cargando generadores de datos...")
-    train_gen, val_gen, test_gen = make_generators()
-
-    print(f"  Train batches : {len(train_gen)}  ({train_gen.samples} imágenes)")
-    print(f"  Val batches   : {len(val_gen)}  ({val_gen.samples} imágenes)")
-    print(f"  Test batches  : {len(test_gen)}  ({test_gen.samples} imágenes)")
-
-    model_names  = ["MobileNetV2", "ResNet50", "EfficientNetB3"]
+    model_names = ["MobileNetV2", "ResNet50", "EfficientNetB3"]
     resultados  = []
 
     for name in model_names:
+        # Generadores propios por modelo: cada backbone requiere su preprocess_input
+        print(f"\nCargando generadores de datos para {name}...")
+        train_gen, val_gen, test_gen = make_generators(name)
+        print(f"  Train batches : {len(train_gen)}  ({train_gen.samples} imágenes)")
+        print(f"  Val batches   : {len(val_gen)}  ({val_gen.samples} imágenes)")
+        print(f"  Test batches  : {len(test_gen)}  ({test_gen.samples} imágenes)")
+
         model, history = train_model(name, train_gen, val_gen)
         metrics = evaluate_model(model, test_gen, name)
         resultados.append(metrics)
